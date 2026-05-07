@@ -15,6 +15,33 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+func (s *knowledgeService) deleteKnowledgeVectorsBestEffort(
+	ctx context.Context,
+	retrieveEngine interface {
+		DeleteByKnowledgeIDList(ctx context.Context, knowledgeIDList []string, dimension int, knowledgeType string) error
+	},
+	knowledgeIDs []string,
+	embeddingModelID string,
+	knowledgeType string,
+) error {
+	if len(knowledgeIDs) == 0 || strings.TrimSpace(embeddingModelID) == "" {
+		return nil
+	}
+
+	embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, embeddingModelID)
+	if err != nil {
+		if errors.Is(err, ErrModelNotFound) {
+			logger.Warnf(ctx,
+				"Skipping vector cleanup for %d knowledge entries because embedding model %s no longer exists",
+				len(knowledgeIDs), embeddingModelID)
+			return nil
+		}
+		return err
+	}
+
+	return retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeIDs, embeddingModel.GetDimensions(), knowledgeType)
+}
+
 // collectImageURLs extracts unique provider:// image URLs from image_info JSON strings.
 func collectImageURLs(ctx context.Context, imageInfos []string) []string {
 	seen := make(map[string]struct{})
@@ -107,12 +134,13 @@ func (s *knowledgeService) DeleteKnowledge(ctx context.Context, id string) error
 				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
 				return err
 			}
-			embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
-			if err != nil {
-				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
-				return err
-			}
-			if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
+			if err := s.deleteKnowledgeVectorsBestEffort(
+				ctx,
+				retrieveEngine,
+				[]string{knowledge.ID},
+				knowledge.EmbeddingModelID,
+				knowledge.Type,
+			); err != nil {
 				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge delete knowledge embedding failed")
 				return err
 			}
@@ -488,12 +516,13 @@ func (s *knowledgeService) DeleteKnowledgeList(ctx context.Context, ids []string
 				logger.Infof(ctx, "Skipping vector store cleanup for %d knowledge entries without embedding model", len(knowledgeIDs))
 				continue
 			}
-			embeddingModel, err := s.modelService.GetEmbeddingModel(ctx, key.EmbeddingModelID)
-			if err != nil {
-				logger.GetLogger(ctx).WithField("error", err).Errorf("DeleteKnowledge get embedding model failed")
-				return err
-			}
-			if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, knowledgeIDs, embeddingModel.GetDimensions(), key.Type); err != nil {
+			if err := s.deleteKnowledgeVectorsBestEffort(
+				ctx,
+				retrieveEngine,
+				knowledgeIDs,
+				key.EmbeddingModelID,
+				key.Type,
+			); err != nil {
 				logger.GetLogger(ctx).
 					WithField("error", err).
 					Errorf("DeleteKnowledge delete knowledge embedding failed")
@@ -598,15 +627,15 @@ func (s *knowledgeService) cleanupKnowledgeResources(ctx context.Context, knowle
 			logger.GetLogger(ctx).WithField("error", err).Error("Failed to init retrieve engine during cleanup")
 			cleanupErr = errors.Join(cleanupErr, err)
 		} else {
-			embeddingModel, modelErr := s.modelService.GetEmbeddingModel(ctx, knowledge.EmbeddingModelID)
-			if modelErr != nil {
-				logger.GetLogger(ctx).WithField("error", modelErr).Error("Failed to get embedding model during cleanup")
-				cleanupErr = errors.Join(cleanupErr, modelErr)
-			} else {
-				if err := retrieveEngine.DeleteByKnowledgeIDList(ctx, []string{knowledge.ID}, embeddingModel.GetDimensions(), knowledge.Type); err != nil {
-					logger.GetLogger(ctx).WithField("error", err).Error("Failed to delete manual knowledge index")
-					cleanupErr = errors.Join(cleanupErr, err)
-				}
+			if err := s.deleteKnowledgeVectorsBestEffort(
+				ctx,
+				retrieveEngine,
+				[]string{knowledge.ID},
+				knowledge.EmbeddingModelID,
+				knowledge.Type,
+			); err != nil {
+				logger.GetLogger(ctx).WithField("error", err).Error("Failed to delete manual knowledge index")
+				cleanupErr = errors.Join(cleanupErr, err)
 			}
 		}
 	}

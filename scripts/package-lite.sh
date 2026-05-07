@@ -54,7 +54,7 @@ fi
 echo ">> Building WeKnora-lite binary..."
 export EDITION=lite
 eval "$(./scripts/get_version.sh env)"
-LDFLAGS="-w -s $(./scripts/get_version.sh ldflags)"
+LDFLAGS="-w -s $(./scripts/get_version.sh ldflags) -X 'google.golang.org/protobuf/reflect/protoregistry.conflictPolicy=warn'"
 export CGO_CFLAGS="-Wno-deprecated-declarations"
 if [ "$(uname)" = "Darwin" ]; then
     export CGO_LDFLAGS="-Wl,-no_warn_duplicate_libraries"

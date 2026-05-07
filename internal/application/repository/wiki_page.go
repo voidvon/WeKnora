@@ -23,6 +23,10 @@ type wikiPageRepository struct {
 	db *gorm.DB
 }
 
+func (r *wikiPageRepository) isSQLite() bool {
+	return r.db.Dialector.Name() == "sqlite"
+}
+
 // NewWikiPageRepository creates a new wiki page repository
 func NewWikiPageRepository(db *gorm.DB) interfaces.WikiPageRepository {
 	return &wikiPageRepository{db: db}
@@ -150,12 +154,23 @@ func (r *wikiPageRepository) List(ctx context.Context, req *types.WikiPageListRe
 		query = query.Where("status = ?", req.Status)
 	}
 	if req.Query != "" {
-		// Use PostgreSQL full-text search + ILIKE for aliases
-		query = query.Where(
-			"(to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(content, '')) @@ plainto_tsquery('simple', ?) OR aliases::text ILIKE ?)",
-			req.Query,
-			"%"+req.Query+"%",
-		)
+		likePattern := "%" + escapeLikePattern(strings.ToLower(req.Query)) + "%"
+		if r.isSQLite() {
+			query = query.Where(
+				"(lower(coalesce(title, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(content, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(summary, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(aliases, '')) LIKE ? ESCAPE '\\')",
+				likePattern,
+				likePattern,
+				likePattern,
+				likePattern,
+			)
+		} else {
+			// Use PostgreSQL full-text search + ILIKE for aliases
+			query = query.Where(
+				"(to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(content, '')) @@ plainto_tsquery('simple', ?) OR aliases::text ILIKE ?)",
+				req.Query,
+				"%"+req.Query+"%",
+			)
+		}
 	}
 
 	var total int64
@@ -235,13 +250,17 @@ func (r *wikiPageRepository) ListBySourceRef(ctx context.Context, kbID string, s
 	likePattern := "%" + escapeLikePattern(prefixStr) + "%"
 
 	var pages []*types.WikiPage
-	if err := r.db.WithContext(ctx).
-		Where("knowledge_base_id = ? AND (source_refs @> ?::jsonb OR source_refs::text LIKE ?)",
-			kbID,
+	query := r.db.WithContext(ctx).Where("knowledge_base_id = ?", kbID)
+	if r.isSQLite() {
+		query = query.Where("source_refs = ? OR source_refs LIKE ? ESCAPE '\\'", string(needle), likePattern)
+	} else {
+		query = query.Where(
+			"source_refs @> ?::jsonb OR source_refs::text LIKE ?",
 			string(needle),
 			likePattern,
-		).
-		Find(&pages).Error; err != nil {
+		)
+	}
+	if err := query.Find(&pages).Error; err != nil {
 		return nil, err
 	}
 	return pages, nil
@@ -327,8 +346,8 @@ func escapeLikePattern(s string) string {
 	return replacer.Replace(s)
 }
 
-// Search performs case-insensitive POSIX regex search on wiki pages within a knowledge base.
-// The query is interpreted as a PostgreSQL regular expression (via ~*).
+// Search performs case-insensitive search on wiki pages within a knowledge base.
+// PostgreSQL uses POSIX regex; SQLite falls back to LIKE-based substring search.
 func (r *wikiPageRepository) Search(ctx context.Context, kbID string, query string, limit int) ([]*types.WikiPage, error) {
 	if limit <= 0 {
 		limit = 10
@@ -338,13 +357,23 @@ func (r *wikiPageRepository) Search(ctx context.Context, kbID string, query stri
 	}
 
 	var pages []*types.WikiPage
-	if err := r.db.WithContext(ctx).
-		Where("knowledge_base_id = ? AND (title ~* ? OR content ~* ? OR summary ~* ? OR slug ~* ?)",
-			kbID, query, query, query, query).
-		Where("status != ?", "archived").
-		Order("updated_at DESC").
-		Limit(limit).
-		Find(&pages).Error; err != nil {
+	db := r.db.WithContext(ctx).Where("knowledge_base_id = ?", kbID).Where("status != ?", "archived")
+	if r.isSQLite() {
+		likePattern := "%" + escapeLikePattern(strings.ToLower(query)) + "%"
+		db = db.Where(
+			"(lower(coalesce(title, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(content, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(summary, '')) LIKE ? ESCAPE '\\' OR lower(coalesce(slug, '')) LIKE ? ESCAPE '\\')",
+			likePattern,
+			likePattern,
+			likePattern,
+			likePattern,
+		)
+	} else {
+		db = db.Where(
+			"(title ~* ? OR content ~* ? OR summary ~* ? OR slug ~* ?)",
+			query, query, query, query,
+		)
+	}
+	if err := db.Order("updated_at DESC").Limit(limit).Find(&pages).Error; err != nil {
 		return nil, err
 	}
 	return pages, nil
@@ -375,12 +404,14 @@ func (r *wikiPageRepository) CountByType(ctx context.Context, kbID string) (map[
 
 // CountOrphans returns the number of pages with no inbound links
 func (r *wikiPageRepository) CountOrphans(ctx context.Context, kbID string) (int64, error) {
+	db := r.db.WithContext(ctx).Model(&types.WikiPage{}).Where("knowledge_base_id = ?", kbID)
+	if r.isSQLite() {
+		db = db.Where("(in_links IS NULL OR trim(in_links) = '' OR in_links = '[]')")
+	} else {
+		db = db.Where("(in_links IS NULL OR in_links = '[]'::JSONB)")
+	}
 	var count int64
-	if err := r.db.WithContext(ctx).
-		Model(&types.WikiPage{}).
-		Where("knowledge_base_id = ?", kbID).
-		Where("(in_links IS NULL OR in_links = '[]'::JSONB)").
-		// Exclude index and log pages as they are naturally root pages
+	if err := db.
 		Where("page_type NOT IN ?", []string{types.WikiPageTypeIndex, types.WikiPageTypeLog}).
 		Count(&count).Error; err != nil {
 		return 0, err

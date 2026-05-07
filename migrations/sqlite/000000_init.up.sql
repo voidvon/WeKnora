@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS knowledge_bases (
     pinned_at DATETIME NULL,
     asr_config TEXT,
     vector_store_id VARCHAR(36),
+    wiki_config TEXT,
+    indexing_strategy TEXT NOT NULL DEFAULT '{"enable_vector":true,"enable_keyword":true,"enable_wiki":false,"enable_graph":false}',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     deleted_at DATETIME
@@ -159,6 +161,7 @@ CREATE TABLE IF NOT EXISTS messages (
     agent_steps TEXT DEFAULT NULL,
     mentioned_items TEXT DEFAULT '[]',
     images TEXT DEFAULT '[]',
+    attachments TEXT DEFAULT '[]',
     is_completed BOOLEAN NOT NULL DEFAULT 0,
     is_fallback BOOLEAN NOT NULL DEFAULT 0,
     channel VARCHAR(50) NOT NULL DEFAULT '',
@@ -171,6 +174,56 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_knowledge_id ON messages(knowledge_id);
+
+CREATE TABLE IF NOT EXISTS wiki_pages (
+    id VARCHAR(36) PRIMARY KEY,
+    tenant_id INTEGER NOT NULL,
+    knowledge_base_id VARCHAR(36) NOT NULL,
+    slug VARCHAR(255) NOT NULL,
+    title VARCHAR(512) NOT NULL DEFAULT '',
+    page_type VARCHAR(32) NOT NULL DEFAULT 'summary',
+    status VARCHAR(32) NOT NULL DEFAULT 'published',
+    content TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    source_refs TEXT NOT NULL DEFAULT '[]',
+    chunk_refs TEXT NOT NULL DEFAULT '[]',
+    in_links TEXT NOT NULL DEFAULT '[]',
+    out_links TEXT NOT NULL DEFAULT '[]',
+    page_metadata TEXT NOT NULL DEFAULT '{}',
+    aliases TEXT NOT NULL DEFAULT '[]',
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    deleted_at DATETIME
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_wiki_pages_kb_slug
+    ON wiki_pages (knowledge_base_id, slug)
+    WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_wiki_pages_kb_id ON wiki_pages(knowledge_base_id);
+CREATE INDEX IF NOT EXISTS idx_wiki_pages_page_type ON wiki_pages(knowledge_base_id, page_type);
+CREATE INDEX IF NOT EXISTS idx_wiki_pages_tenant_id ON wiki_pages(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_wiki_pages_deleted_at ON wiki_pages(deleted_at);
+
+CREATE TABLE IF NOT EXISTS wiki_page_issues (
+    id VARCHAR(36) PRIMARY KEY,
+    tenant_id INTEGER NOT NULL,
+    knowledge_base_id VARCHAR(36) NOT NULL,
+    slug VARCHAR(255) NOT NULL,
+    issue_type VARCHAR(50) NOT NULL,
+    description TEXT NOT NULL,
+    suspected_knowledge_ids TEXT NOT NULL DEFAULT '[]',
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    reported_by VARCHAR(100) NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    deleted_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_wiki_page_issues_tenant_id ON wiki_page_issues(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_wiki_page_issues_knowledge_base_id ON wiki_page_issues(knowledge_base_id);
+CREATE INDEX IF NOT EXISTS idx_wiki_page_issues_slug ON wiki_page_issues(slug);
+CREATE INDEX IF NOT EXISTS idx_wiki_page_issues_status ON wiki_page_issues(status);
 
 CREATE TABLE IF NOT EXISTS chunks (
     id VARCHAR(36) PRIMARY KEY,
@@ -492,6 +545,7 @@ CREATE TABLE IF NOT EXISTS sync_logs (
     tenant_id INTEGER NOT NULL,
     status VARCHAR(32) NOT NULL,
     started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    end_time DATETIME NULL,
     finished_at DATETIME NULL,
     items_total INTEGER DEFAULT 0,
     items_created INTEGER DEFAULT 0,
